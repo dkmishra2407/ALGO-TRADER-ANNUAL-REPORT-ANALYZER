@@ -2,7 +2,20 @@ import backtrader as bt
 import tempfile
 import os
 import importlib.util
-import sys
+import boto3
+from botocore.exceptions import NoCredentialsError, ClientError
+from dotenv import load_dotenv
+
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+# AWS S3 setup
+AWS_STRATEGY_BUCKET = os.getenv("AWS_STRATEGY_BUCKET", "algo-trader-strategies")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+
+def get_s3_client():
+    return boto3.client('s3', region_name=AWS_REGION)
+
 
 def create_custom_strategy(strategy_code: str, strategy_name: str):
     """
@@ -45,14 +58,49 @@ def create_custom_strategy(strategy_code: str, strategy_name: str):
 
 def save_custom_strategy(strategy_code: str, strategy_name: str):
     """
-    Save custom strategy to strategies directory
+    Save custom strategy to AWS S3
     """
-    strategies_dir = os.path.join(os.path.dirname(__file__), '..', 'strategies')
-    os.makedirs(strategies_dir, exist_ok=True)
+    try:
+        key = f"strategies/{strategy_name}_strategy.py"
+        s3_client.put_object(
+            Bucket=AWS_STRATEGY_BUCKET,
+            Key=key,
+            Body=strategy_code,
+            ContentType='text/plain'
+        )
+        return f"s3://{AWS_STRATEGY_BUCKET}/{key}"
+    except (NoCredentialsError, ClientError) as e:
+        raise ValueError(f"Error saving strategy to AWS S3: {str(e)}")
 
-    file_path = os.path.join(strategies_dir, f"{strategy_name}_strategy.py")
+def load_custom_strategy_code(strategy_name: str):
+    """
+    Load custom strategy code from AWS S3
+    """
+    try:
+        key = f"strategies/{strategy_name}_strategy.py"
+        response = s3_client.get_object(Bucket=AWS_STRATEGY_BUCKET, Key=key)
+        return response['Body'].read().decode('utf-8')
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            return None
+        raise ValueError(f"Error loading strategy from AWS S3: {str(e)}")
 
-    with open(file_path, 'w') as f:
-        f.write(strategy_code)
-
-    return file_path
+def list_custom_strategies_from_s3():
+    """
+    List custom strategies stored in AWS S3
+    """
+    try:
+        response = s3_client.list_objects_v2(Bucket=AWS_STRATEGY_BUCKET, Prefix='strategies/')
+        if 'Contents' not in response:
+            return []
+        
+        strategies = []
+        for obj in response['Contents']:
+            key = obj['Key']
+            if key.endswith('_strategy.py'):
+                strategy_name = key.replace('strategies/', '').replace('_strategy.py', '')
+                strategies.append(strategy_name)
+        return strategies
+    except ClientError as e:
+        print(f"Error listing strategies from S3: {e}")
+        return []

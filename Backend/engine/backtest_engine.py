@@ -4,7 +4,7 @@ from strategies.sma_strategy import SMAStrategy
 from strategies.rsi_strategy import RSIStrategy
 from strategies.macd_strategy import MACDStrategy
 from strategies.bollinger_strategy import BollingerBandsStrategy
-from .custom_strategy_engine import create_custom_strategy
+from .custom_strategy_engine import create_custom_strategy, load_custom_strategy_code, list_custom_strategies_from_s3
 from utils.metrics import sharpe_ratio, max_drawdown, total_return, win_rate
 import importlib
 import sys
@@ -96,12 +96,22 @@ def run_backtest(params):
     }
 
 def load_custom_strategy(strategy_name):
-    """Load a custom strategy from the strategies directory"""
+    """Load a custom strategy from AWS S3 or local directory"""
     if strategy_name in _custom_strategies:
         return _custom_strategies[strategy_name]
 
     try:
-        # Check if it's a file in strategies directory
+        # First try to load from S3
+        strategy_code = load_custom_strategy_code(strategy_name)
+        if strategy_code is not None:
+            strategy_class = create_custom_strategy(strategy_code, strategy_name)
+            _custom_strategies[strategy_name] = strategy_class
+            return strategy_class
+    except Exception as e:
+        print(f"Error loading from S3: {e}")
+
+    # Fallback to local file
+    try:
         strategy_file = f"strategies.{strategy_name}_strategy"
         module = importlib.import_module(strategy_file)
 
@@ -133,10 +143,16 @@ def get_available_strategies():
     """Get list of available strategies"""
     strategies = list(STRATEGY_MAP.keys())
 
-    # Add custom strategies
+    # Add custom strategies from cache
     strategies.extend(_custom_strategies.keys())
 
-    # Check for custom strategies in strategies directory
+    # Add custom strategies from S3
+    s3_strategies = list_custom_strategies_from_s3()
+    for strategy in s3_strategies:
+        if strategy not in strategies:
+            strategies.append(strategy)
+
+    # Add custom strategies from local directory
     strategies_dir = os.path.join(os.path.dirname(__file__), '..', 'strategies')
     if os.path.exists(strategies_dir):
         for file in os.listdir(strategies_dir):

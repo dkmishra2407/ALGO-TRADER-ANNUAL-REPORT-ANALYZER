@@ -1,6 +1,8 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-backtrader==1.9.76.123
-yfinance==0.2.28
-numpy==1.24.3
-pydantic==2.5.0
+fastapi==0.115.0
+uvicorn==0.32.0
+backtrader==1.9.78.123
+yfinance==0.2.43
+numpy==2.0.0
+pydantic==2.9.0
+boto3==1.35.0
+python-dotenv==1.0.1

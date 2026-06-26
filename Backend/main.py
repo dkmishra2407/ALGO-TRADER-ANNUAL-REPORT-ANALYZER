@@ -54,6 +54,12 @@ NSE_HEADERS = {
 
 # Models to race — free/cheap models available via OpenRouter
 RACE_MODELS = [
+    "openai/gpt-4o-mini",
+    "mistralai/mistral-small-2501",
+    "meta-llama/llama-3-8b-instruct",
+    "google/gemma-2-9b-it",
+    "cohere/command-r-plus-08-2024",
+    "anthropic/claude-3.5-mini",
     "openrouter/auto",
     "deepseek/deepseek-chat",
     "deepseek/deepseek-coder",
@@ -217,7 +223,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

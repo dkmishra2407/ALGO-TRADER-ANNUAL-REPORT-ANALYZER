@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
+import { API_BASE_URL } from "./config/api.js";
 
 /* ─────────────────────────────────────────────
    Constants
@@ -52,9 +53,6 @@ const TABS = [
 /* ─────────────────────────────────────────────
    Helpers
 ───────────────────────────────────────────── */
-/**
- * Safe JSON parse — returns parsed object or null on failure.
- */
 function tryParseJson(text) {
   try {
     return JSON.parse(text.trim() || "{}");
@@ -63,13 +61,217 @@ function tryParseJson(text) {
   }
 }
 
+/** Format a metric value for display */
+function formatMetricValue(key, val) {
+  if (typeof val !== "number") return String(val);
+  const isPercent = key.includes("return") || key.includes("rate") || key.includes("drawdown");
+  if (isPercent) return `${(val * 100).toFixed(2)}%`;
+  if (Math.abs(val) > 1000) return val.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return val.toFixed(4);
+}
+
+/** Is a metric value "positive" (green) or "negative" (red)? */
+function metricSentiment(key, val) {
+  if (typeof val !== "number") return "neutral";
+  const isInverse = key.includes("drawdown") || key.includes("loss");
+  return isInverse ? (val <= 0 ? "positive" : "negative") : (val >= 0 ? "positive" : "negative");
+}
+
+/**
+ * Render analysis text: split on double-newlines, detect section headers
+ * (lines ending with ":" or all-caps short lines), bold key terms, etc.
+ */
+function parseAnalysisText(text) {
+  if (!text || typeof text !== "string") return [];
+  const blocks = text.split(/\n{2,}/);
+  return blocks.map((block, i) => {
+    const lines = block.trim().split("\n");
+    // Detect heading: single short line ending with colon, or ALL CAPS
+    if (
+      lines.length === 1 &&
+      (lines[0].endsWith(":") || lines[0] === lines[0].toUpperCase()) &&
+      lines[0].length < 80
+    ) {
+      return { type: "heading", text: lines[0].replace(/:$/, ""), key: i };
+    }
+    // Detect bullet list
+    if (lines.every(l => /^[-•*]\s/.test(l.trim()))) {
+      return { type: "bullets", items: lines.map(l => l.replace(/^[-•*]\s/, "").trim()), key: i };
+    }
+    // Detect numbered list
+    if (lines.every(l => /^\d+[.)]\s/.test(l.trim()))) {
+      return { type: "numbered", items: lines.map(l => l.replace(/^\d+[.)]\s/, "").trim()), key: i };
+    }
+    // Plain paragraph
+    return { type: "paragraph", text: block.trim(), key: i };
+  }).filter(b => (b.text || b.items?.length));
+}
+
+/* ─────────────────────────────────────────────
+   Sub-components
+───────────────────────────────────────────── */
+function Field({ label, children, style }) {
+  return (
+    <label className="field" style={style}>
+      <span className="field-label">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function StatusMsg({ s }) {
+  if (!s.msg) return null;
+  return <span className={`status-msg ${s.ok ? "ok" : "err"}`}>{s.msg}</span>;
+}
+
+/** Render structured analysis text */
+function AnalysisRenderer({ text }) {
+  const blocks = parseAnalysisText(text);
+  if (!blocks.length) return <p className="analysis-empty">No analysis content.</p>;
+  return (
+    <div className="analysis-body">
+      {blocks.map(b => {
+        if (b.type === "heading") {
+          return <h4 className="analysis-heading" key={b.key}>{b.text}</h4>;
+        }
+        if (b.type === "bullets") {
+          return (
+            <ul className="analysis-list" key={b.key}>
+              {b.items.map((item, j) => <li key={j}>{item}</li>)}
+            </ul>
+          );
+        }
+        if (b.type === "numbered") {
+          return (
+            <ol className="analysis-list analysis-list--ordered" key={b.key}>
+              {b.items.map((item, j) => <li key={j}>{item}</li>)}
+            </ol>
+          );
+        }
+        return <p className="analysis-para" key={b.key}>{b.text}</p>;
+      })}
+    </div>
+  );
+}
+
+/** Render trade log table */
+function TradeLog({ trades }) {
+  if (!Array.isArray(trades) || trades.length === 0) return null;
+  return (
+    <div className="trade-log">
+      <h4 className="section-subhead">Trade Log <span className="badge">{trades.length}</span></h4>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              {Object.keys(trades[0]).map(k => <th key={k}>{k.replace(/_/g, " ")}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {trades.map((row, i) => (
+              <tr key={i}>
+                {Object.entries(row).map(([k, v]) => (
+                  <td key={k} className={
+                    (k === "action" && v === "BUY") ? "cell-buy" :
+                    (k === "action" && v === "SELL") ? "cell-sell" : ""
+                  }>
+                    {typeof v === "number" ? v.toLocaleString(undefined, { maximumFractionDigits: 4 }) : String(v)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/** Render metrics grid with color-coded values */
+function MetricsGrid({ metrics }) {
+  if (!metrics || typeof metrics !== "object") return null;
+  const entries = Object.entries(metrics);
+  if (!entries.length) return null;
+  return (
+    <div className="metrics-section">
+      <h4 className="section-subhead">Performance Metrics</h4>
+      <div className="metrics-grid">
+        {entries.map(([k, v]) => {
+          const sentiment = metricSentiment(k, v);
+          return (
+            <div className="metric" key={k}>
+              <span className={`metric-val metric-val--${sentiment}`}>
+                {formatMetricValue(k, v)}
+              </span>
+              <span className="metric-key">{k.replace(/_/g, " ")}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Render generic result payload intelligently */
+function ResultRenderer({ payload, title }) {
+  if (!payload) return null;
+
+  const { metrics, analysis, trade_log, trades, message, stock_name, ...rest } = payload;
+
+  // Remove internal/noisy keys from "other" display
+  const otherKeys = Object.keys(rest).filter(
+    k => !["status", "strategy", "ticker"].includes(k)
+  );
+
+  return (
+    <div className="results-card">
+      <div className="results-header">
+        <span className="results-badge">
+          {analysis ? "📊 Analysis" : "🔬 Backtest"}
+        </span>
+        <p className="results-title">{title}</p>
+        {message && <p className="results-message">{message}</p>}
+      </div>
+
+      {/* Metrics */}
+      <MetricsGrid metrics={metrics} />
+
+      {/* AI Analysis text — properly structured */}
+      {analysis && (
+        <div className="analysis-section">
+          <h4 className="section-subhead">
+            AI Analysis
+            {stock_name && <span className="badge" style={{ marginLeft: "0.5rem" }}>{stock_name}</span>}
+          </h4>
+          <AnalysisRenderer text={analysis} />
+        </div>
+      )}
+
+      {/* Trade log */}
+      <TradeLog trades={trade_log ?? trades} />
+
+      {/* Remaining fields as collapsible JSON */}
+      {otherKeys.length > 0 && (
+        <details className="raw-details">
+          <summary>Raw response data</summary>
+          <pre className="result-pre">
+            {JSON.stringify(
+              Object.fromEntries(otherKeys.map(k => [k, rest[k]])),
+              null, 2
+            )}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
 /* ─────────────────────────────────────────────
    App
 ───────────────────────────────────────────── */
 export default function App() {
   const [activeTab, setActiveTab]       = useState("backtest");
-  const [apiBaseUrl, setApiBaseUrl]     = useState("http://127.0.0.1:8001");
-  const [apiStatus, setApiStatus]       = useState("connecting");  // "connecting" | "online" | "offline"
+  const [apiStatus, setApiStatus]       = useState("connecting");
   const [strategies, setStrategies]     = useState([]);
   const [selectedStrategy, setSelectedStrategy] = useState("");
   const [strategyParamsText, setStrategyParamsText] = useState("{}");
@@ -83,7 +285,7 @@ export default function App() {
   const [analyzerStatus, setAnalyzerStatus] = useState({ msg: "", ok: true });
 
   const [loading, setLoading] = useState({
-    connect: false, backtest: false, custom: false, oneoff: false, analyzer: false,
+    backtest: false, custom: false, oneoff: false, analyzer: false,
   });
 
   const [backtestForm, setBacktestForm] = useState({
@@ -100,26 +302,25 @@ export default function App() {
 
   const [analyzerForm, setAnalyzerForm] = useState({ stock_name: "IRCTC", no_of_agents: 3 });
 
-  /* ── derived ── */
-  const cleanBaseUrl = useMemo(() => apiBaseUrl.trim().replace(/\/+$/, ""), [apiBaseUrl]);
-
   const stats = useMemo(() => [
     { label: "Available Strategies", value: strategies.length || "—" },
     {
       label: "Last Total Return",
-      value: lastMetrics ? `${(lastMetrics.total_return * 100).toFixed(2)}%` : "—",
+      value: lastMetrics
+        ? formatMetricValue("total_return", lastMetrics.total_return)
+        : "—",
     },
     {
       label: "Last Win Rate",
-      value: lastMetrics ? `${(lastMetrics.win_rate * 100).toFixed(1)}%` : "—",
+      value: lastMetrics
+        ? formatMetricValue("win_rate", lastMetrics.win_rate)
+        : "—",
     },
   ], [strategies, lastMetrics]);
 
-  /* ─────────────────────────────────────────
-     API helpers
-  ───────────────────────────────────────── */
+  /* ── API helpers ── */
   const apiRequest = useCallback(async (path, options = {}) => {
-    const res = await fetch(`${cleanBaseUrl}${path}`, {
+    const res = await fetch(`${API_BASE_URL}${path}`, {
       headers: { "Content-Type": "application/json" },
       ...options,
     });
@@ -129,11 +330,10 @@ export default function App() {
       throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     }
     return data;
-  }, [cleanBaseUrl]);
+  }, []);
 
   const loadStrategies = useCallback(async () => {
     const data = await apiRequest("/strategies");
-    // Endpoint returns { strategies: string[] }
     const list = Array.isArray(data.strategies) ? data.strategies : [];
     setStrategies(list);
     if (list.length > 0 && !selectedStrategy) {
@@ -144,7 +344,6 @@ export default function App() {
   }, [apiRequest, selectedStrategy]);
 
   const connectWorkspace = useCallback(async () => {
-    setLoading(l => ({ ...l, connect: true }));
     setApiStatus("connecting");
     try {
       await loadStrategies();
@@ -152,16 +351,11 @@ export default function App() {
     } catch (err) {
       setApiStatus(`offline: ${err.message}`);
       setStrategies([]);
-    } finally {
-      setLoading(l => ({ ...l, connect: false }));
     }
   }, [loadStrategies]);
 
-  useEffect(() => { connectWorkspace(); }, []); // eslint-disable-line
+  useEffect(() => { connectWorkspace(); }, [connectWorkspace]);
 
-  /* ─────────────────────────────────────────
-     Strategy param helper
-  ───────────────────────────────────────── */
   function onStrategyChange(name) {
     setSelectedStrategy(name);
     setStrategyParamsText(JSON.stringify(defaultParamsByStrategy[name] ?? {}, null, 2));
@@ -173,9 +367,7 @@ export default function App() {
     setResultPayload(payload);
   }
 
-  /* ─────────────────────────────────────────
-     Form submissions
-  ───────────────────────────────────────── */
+  /* ── Form submissions ── */
   async function submitBacktest(e) {
     e.preventDefault();
     if (!selectedStrategy) {
@@ -193,13 +385,9 @@ export default function App() {
       const data = await apiRequest("/run_backtest", {
         method: "POST",
         body: JSON.stringify({
-          ticker:          backtestForm.ticker.trim(),
-          start_date:      backtestForm.start_date,
-          end_date:        backtestForm.end_date,
-          strategy:        selectedStrategy,
-          cash:            Number(backtestForm.cash),
-          strategy_params: params,
-          plot:            backtestForm.plot,
+          ticker: backtestForm.ticker.trim(), start_date: backtestForm.start_date,
+          end_date: backtestForm.end_date, strategy: selectedStrategy,
+          cash: Number(backtestForm.cash), strategy_params: params, plot: backtestForm.plot,
         }),
       });
       setBacktestStatus({ msg: "Completed successfully.", ok: true });
@@ -238,12 +426,9 @@ export default function App() {
       const data = await apiRequest("/run_custom_backtest", {
         method: "POST",
         body: JSON.stringify({
-          ticker:          oneOffForm.ticker.trim(),
-          start_date:      oneOffForm.start_date,
-          end_date:        oneOffForm.end_date,
-          strategy:        oneOffForm.strategy.trim(),
-          cash:            Number(oneOffForm.cash),
-          plot:            oneOffForm.plot,
+          ticker: oneOffForm.ticker.trim(), start_date: oneOffForm.start_date,
+          end_date: oneOffForm.end_date, strategy: oneOffForm.strategy.trim(),
+          cash: Number(oneOffForm.cash), plot: oneOffForm.plot,
           strategy_params: { code: oneOffForm.code },
         }),
       });
@@ -264,7 +449,7 @@ export default function App() {
       const data = await apiRequest("/analyze", {
         method: "POST",
         body: JSON.stringify({
-          stock_name:  analyzerForm.stock_name.trim(),
+          stock_name: analyzerForm.stock_name.trim(),
           no_of_agents: Number(analyzerForm.no_of_agents) || 1,
         }),
       });
@@ -277,21 +462,16 @@ export default function App() {
     }
   }
 
-  /* ─────────────────────────────────────────
-     Status badge color
-  ───────────────────────────────────────── */
   const statusColor =
-    apiStatus === "online"      ? "#22c55e" :
-    apiStatus === "connecting"  ? "#f59e0b" : "#ef4444";
+    apiStatus === "online"     ? "#22c55e" :
+    apiStatus === "connecting" ? "#f59e0b" : "#ef4444";
 
-  /* ─────────────────────────────────────────
-     Render
-  ───────────────────────────────────────── */
+  /* ── Render ── */
   return (
     <>
       <style>{CSS}</style>
       <div className="app">
-        {/* ── Topbar ── */}
+        {/* Topbar */}
         <nav className="topbar">
           <span className="brand">⬡ AlgoTrader</span>
           <div className="topbar-right">
@@ -304,7 +484,7 @@ export default function App() {
           </div>
         </nav>
 
-        {/* ── Hero ── */}
+        {/* Hero */}
         <header className="hero">
           <p className="eyebrow">Algorithmic Trading Studio</p>
           <h1>Design, test, and launch<br />strategy ideas with confidence.</h1>
@@ -318,7 +498,7 @@ export default function App() {
           </div>
         </header>
 
-        {/* ── Stats ── */}
+        {/* Stats */}
         <section className="stats-row">
           {stats.map(s => (
             <div className="stat-card" key={s.label}>
@@ -328,7 +508,7 @@ export default function App() {
           ))}
         </section>
 
-        {/* ── Feature strip ── */}
+        {/* Feature strip */}
         <section className="features">
           {[
             { icon: "⚡", title: "Reliable engine", body: "Consistent historical tests across built-in and custom strategies." },
@@ -343,28 +523,24 @@ export default function App() {
           ))}
         </section>
 
-        {/* ── Studio ── */}
+        {/* Studio */}
         <section className="studio">
           <div className="studio-head">
             <h2>Trading Studio</h2>
             <div className="tabs" role="tablist">
               {TABS.map(t => (
                 <button
-                  key={t.id}
-                  role="tab"
+                  key={t.id} role="tab"
                   aria-selected={activeTab === t.id}
                   className={`tab ${activeTab === t.id ? "active" : ""}`}
                   onClick={() => setActiveTab(t.id)}
-                >
-                  {t.label}
-                </button>
+                >{t.label}</button>
               ))}
             </div>
           </div>
 
           <div className="panel" role="tabpanel">
-
-            {/* ── BACKTEST ── */}
+            {/* BACKTEST */}
             {activeTab === "backtest" && (
               <form onSubmit={submitBacktest}>
                 <div className="grid-3">
@@ -420,7 +596,7 @@ export default function App() {
               </form>
             )}
 
-            {/* ── BUILDER ── */}
+            {/* BUILDER */}
             {activeTab === "builder" && (
               <form onSubmit={submitCustomStrategy}>
                 <Field label="Strategy Name">
@@ -441,7 +617,7 @@ export default function App() {
               </form>
             )}
 
-            {/* ── SANDBOX ── */}
+            {/* SANDBOX */}
             {activeTab === "sandbox" && (
               <form onSubmit={submitOneOffBacktest}>
                 <div className="grid-3">
@@ -489,7 +665,7 @@ export default function App() {
               </form>
             )}
 
-            {/* ── ANALYZER ── */}
+            {/* ANALYZER */}
             {activeTab === "analyzer" && (
               <form onSubmit={submitAnalysis}>
                 <div className="grid-3">
@@ -514,52 +690,17 @@ export default function App() {
           </div>
         </section>
 
-        {/* ── Results ── */}
+        {/* Results — now uses ResultRenderer */}
         <section className="results-section">
           <h2>Run Results</h2>
-          {resultPayload ? (
-            <div className="results-card">
-              <p className="results-title">{resultTitle}</p>
-              {resultPayload.metrics && (
-                <div className="metrics-grid">
-                  {Object.entries(resultPayload.metrics).map(([k, v]) => (
-                    <div className="metric" key={k}>
-                      <span className="metric-val">
-                        {typeof v === "number" ? (
-                          k.includes("return") || k.includes("rate") || k.includes("drawdown")
-                            ? `${(v * 100).toFixed(2)}%`
-                            : v.toFixed(4)
-                        ) : String(v)}
-                      </span>
-                      <span className="metric-key">{k.replace(/_/g, " ")}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <pre className="result-pre">{JSON.stringify(resultPayload, null, 2)}</pre>
-            </div>
-          ) : (
-            <div className="results-card empty">
-              <p>Run a backtest or analysis to see results here.</p>
-            </div>
-          )}
-        </section>
-
-        {/* ── Workspace Settings ── */}
-        <section className="settings-section">
-          <h3>Workspace Settings</h3>
-          <div className="settings-row">
-            <Field label="Backend URL" style={{ flex: 1 }}>
-              <input value={apiBaseUrl}
-                onChange={e => setApiBaseUrl(e.target.value)}
-                onBlur={connectWorkspace}
-                onKeyDown={e => e.key === "Enter" && connectWorkspace()} />
-            </Field>
-            <button className="btn-ghost" type="button" onClick={connectWorkspace}
-              disabled={loading.connect} style={{ alignSelf: "flex-end", marginBottom: "0.1rem" }}>
-              {loading.connect ? "Connecting…" : "Reconnect"}
-            </button>
-          </div>
+          {resultPayload
+            ? <ResultRenderer payload={resultPayload} title={resultTitle} />
+            : (
+              <div className="results-card empty">
+                <p>Run a backtest or analysis to see results here.</p>
+              </div>
+            )
+          }
         </section>
       </div>
     </>
@@ -567,24 +708,7 @@ export default function App() {
 }
 
 /* ─────────────────────────────────────────────
-   Small components
-───────────────────────────────────────────── */
-function Field({ label, children, style }) {
-  return (
-    <label className="field" style={style}>
-      <span className="field-label">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function StatusMsg({ s }) {
-  if (!s.msg) return null;
-  return <span className={`status-msg ${s.ok ? "ok" : "err"}`}>{s.msg}</span>;
-}
-
-/* ─────────────────────────────────────────────
-   CSS (embedded — works without App.css)
+   CSS
 ───────────────────────────────────────────── */
 const CSS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@600;700;800&family=DM+Sans:wght@400;500&display=swap');
@@ -600,6 +724,8 @@ const CSS = `
     --text:     #e8ecf4;
     --muted:    #6b7793;
     --danger:   #ff6b6b;
+    --positive: #22c55e;
+    --negative: #ff6b6b;
     --radius:   10px;
     --font-head: 'Syne', sans-serif;
     --font-body: 'DM Sans', sans-serif;
@@ -607,10 +733,9 @@ const CSS = `
   }
 
   body { background: var(--bg); color: var(--text); font-family: var(--font-body); }
-
   .app { max-width: 1100px; margin: 0 auto; padding: 0 1.5rem 5rem; }
 
-  /* ── Topbar ── */
+  /* Topbar */
   .topbar {
     display: flex; align-items: center; justify-content: space-between;
     padding: 1.1rem 0; border-bottom: 1px solid var(--border);
@@ -621,155 +746,116 @@ const CSS = `
   .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .status-label { font-size: 0.8rem; color: var(--muted); font-family: var(--font-mono); }
 
-  /* ── Hero ── */
-  .hero {
-    padding: 5rem 0 3.5rem;
-    border-bottom: 1px solid var(--border);
-  }
-  .eyebrow {
-    font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em;
-    text-transform: uppercase; color: var(--accent); margin-bottom: 1.1rem;
-  }
-  .hero h1 {
-    font-family: var(--font-head); font-size: clamp(2.2rem, 5vw, 3.5rem);
-    font-weight: 800; line-height: 1.1; letter-spacing: -0.03em;
-    color: var(--text); margin-bottom: 1.2rem;
-  }
+  /* Hero */
+  .hero { padding: 5rem 0 3.5rem; border-bottom: 1px solid var(--border); }
+  .eyebrow { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 1.1rem; }
+  .hero h1 { font-family: var(--font-head); font-size: clamp(2.2rem, 5vw, 3.5rem); font-weight: 800; line-height: 1.1; letter-spacing: -0.03em; color: var(--text); margin-bottom: 1.2rem; }
   .hero-sub { color: var(--muted); max-width: 560px; line-height: 1.7; margin-bottom: 2rem; }
   .hero-actions { display: flex; gap: 0.75rem; flex-wrap: wrap; }
 
-  /* ── Buttons ── */
-  .btn-primary {
-    background: var(--accent); color: #0b0e14; font-family: var(--font-head);
-    font-weight: 700; font-size: 0.88rem; border: none; border-radius: var(--radius);
-    padding: 0.65rem 1.4rem; cursor: pointer; transition: opacity .15s;
-    white-space: nowrap;
-  }
+  /* Buttons */
+  .btn-primary { background: var(--accent); color: #0b0e14; font-family: var(--font-head); font-weight: 700; font-size: 0.88rem; border: none; border-radius: var(--radius); padding: 0.65rem 1.4rem; cursor: pointer; transition: opacity .15s; white-space: nowrap; }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-primary:hover:not(:disabled) { opacity: 0.85; }
 
-  .btn-ghost {
-    background: transparent; color: var(--text); font-family: var(--font-head);
-    font-weight: 600; font-size: 0.88rem;
-    border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 0.65rem 1.4rem; cursor: pointer; transition: border-color .15s, color .15s;
-    white-space: nowrap;
-  }
+  .btn-ghost { background: transparent; color: var(--text); font-family: var(--font-head); font-weight: 600; font-size: 0.88rem; border: 1px solid var(--border); border-radius: var(--radius); padding: 0.65rem 1.4rem; cursor: pointer; transition: border-color .15s, color .15s; white-space: nowrap; }
   .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 
-  /* ── Stats ── */
-  .stats-row {
-    display: grid; grid-template-columns: repeat(3,1fr); gap: 1rem;
-    padding: 2.5rem 0;
-  }
-  .stat-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 1.4rem 1.6rem;
-    display: flex; flex-direction: column; gap: 0.35rem;
-  }
+  /* Stats */
+  .stats-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 1rem; padding: 2.5rem 0; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.4rem 1.6rem; display: flex; flex-direction: column; gap: 0.35rem; }
   .stat-value { font-family: var(--font-head); font-size: 1.9rem; font-weight: 800; color: var(--accent); }
   .stat-label { font-size: 0.78rem; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
 
-  /* ── Features ── */
-  .features {
-    display: grid; grid-template-columns: repeat(3,1fr); gap: 1rem;
-    padding-bottom: 3rem; border-bottom: 1px solid var(--border);
-  }
-  .feature-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 1.4rem 1.5rem;
-  }
+  /* Features */
+  .features { display: grid; grid-template-columns: repeat(3,1fr); gap: 1rem; padding-bottom: 3rem; border-bottom: 1px solid var(--border); }
+  .feature-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.4rem 1.5rem; }
   .feature-icon { font-size: 1.5rem; display: block; margin-bottom: 0.7rem; }
   .feature-card h3 { font-family: var(--font-head); font-size: 1rem; font-weight: 700; margin-bottom: 0.5rem; }
   .feature-card p  { font-size: 0.85rem; color: var(--muted); line-height: 1.6; }
 
-  /* ── Studio ── */
+  /* Studio */
   .studio { padding: 3rem 0; border-bottom: 1px solid var(--border); }
   .studio-head { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
   .studio-head h2 { font-family: var(--font-head); font-size: 1.4rem; font-weight: 800; }
-
   .tabs { display: flex; gap: 0.25rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px; flex-wrap: wrap; }
-  .tab {
-    background: transparent; border: none; color: var(--muted);
-    font-family: var(--font-body); font-size: 0.83rem; font-weight: 500;
-    padding: 0.45rem 0.9rem; border-radius: 7px; cursor: pointer; transition: all .15s;
-  }
+  .tab { background: transparent; border: none; color: var(--muted); font-family: var(--font-body); font-size: 0.83rem; font-weight: 500; padding: 0.45rem 0.9rem; border-radius: 7px; cursor: pointer; transition: all .15s; }
   .tab.active { background: var(--accent); color: #0b0e14; font-weight: 700; }
   .tab:hover:not(.active) { color: var(--text); }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.75rem; }
 
-  .panel {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 1.75rem;
-  }
-
-  /* ── Form Elements ── */
+  /* Form Elements */
   .grid-3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 1rem; margin-bottom: 1rem; }
-  .grid-2 { display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: end; }
-
   .field { display: flex; flex-direction: column; gap: 0.45rem; margin-bottom: 1rem; }
   .field-label { font-size: 0.77rem; font-weight: 500; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
   .field-error { font-size: 0.75rem; color: var(--danger); margin-top: 0.2rem; }
-
-  input, select, textarea {
-    width: 100%; background: var(--bg); color: var(--text);
-    border: 1px solid var(--border); border-radius: 7px;
-    padding: 0.6rem 0.75rem; font-family: var(--font-body); font-size: 0.9rem;
-    transition: border-color .15s; outline: none;
-  }
+  input, select, textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 0.6rem 0.75rem; font-family: var(--font-body); font-size: 0.9rem; transition: border-color .15s; outline: none; }
   input:focus, select:focus, textarea:focus { border-color: var(--accent2); }
   textarea { resize: vertical; }
   select option { background: var(--surface); }
-
-  .checkbox-row {
-    display: flex; align-items: center; gap: 0.5rem;
-    font-size: 0.88rem; color: var(--muted); cursor: pointer;
-    padding-top: 0.25rem;
-  }
+  .checkbox-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.88rem; color: var(--muted); cursor: pointer; padding-top: 0.25rem; }
   .checkbox-row input { width: auto; }
-
   .form-footer { display: flex; align-items: center; gap: 1rem; margin-top: 0.5rem; }
-
   .status-msg { font-size: 0.83rem; font-family: var(--font-mono); }
   .status-msg.ok  { color: var(--accent); }
   .status-msg.err { color: var(--danger); }
 
-  /* ── Results ── */
+  /* Results section */
   .results-section { padding: 3rem 0; border-bottom: 1px solid var(--border); }
   .results-section h2 { font-family: var(--font-head); font-size: 1.4rem; font-weight: 800; margin-bottom: 1.25rem; }
-
-  .results-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 1.75rem;
-  }
+  .results-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.75rem; }
   .results-card.empty { color: var(--muted); font-size: 0.9rem; text-align: center; padding: 3rem; }
-  .results-title { font-family: var(--font-head); font-size: 1rem; font-weight: 700; margin-bottom: 1.25rem; color: var(--accent2); }
 
-  .metrics-grid {
-    display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1.5rem;
-    padding-bottom: 1.25rem; border-bottom: 1px solid var(--border);
-  }
-  .metric {
-    background: var(--bg); border: 1px solid var(--border);
-    border-radius: 7px; padding: 0.65rem 1rem;
-    display: flex; flex-direction: column; gap: 0.2rem; min-width: 120px;
-  }
-  .metric-val { font-family: var(--font-mono); font-size: 1rem; font-weight: 500; color: var(--text); }
+  .results-header { margin-bottom: 1.5rem; }
+  .results-badge { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; background: rgba(79,158,255,0.12); color: var(--accent2); border: 1px solid rgba(79,158,255,0.25); border-radius: 5px; padding: 0.2rem 0.55rem; display: inline-block; margin-bottom: 0.6rem; }
+  .results-title { font-family: var(--font-head); font-size: 1.1rem; font-weight: 700; color: var(--text); margin-bottom: 0.35rem; }
+  .results-message { font-size: 0.85rem; color: var(--accent); font-family: var(--font-mono); }
+
+  /* Section subheads */
+  .section-subhead { font-family: var(--font-head); font-size: 0.85rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-bottom: 0.85rem; display: flex; align-items: center; gap: 0.5rem; }
+  .badge { font-family: var(--font-mono); font-size: 0.7rem; background: var(--border); color: var(--text); border-radius: 4px; padding: 0.15rem 0.45rem; font-weight: 400; letter-spacing: 0; }
+
+  /* Metrics */
+  .metrics-section { margin-bottom: 1.75rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+  .metrics-grid { display: flex; flex-wrap: wrap; gap: 0.65rem; }
+  .metric { background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 0.65rem 1rem; display: flex; flex-direction: column; gap: 0.2rem; min-width: 110px; }
+  .metric-val { font-family: var(--font-mono); font-size: 1rem; font-weight: 500; }
+  .metric-val--positive { color: var(--positive); }
+  .metric-val--negative { color: var(--negative); }
+  .metric-val--neutral  { color: var(--text); }
   .metric-key { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 
-  .result-pre {
-    font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted);
-    white-space: pre-wrap; word-break: break-all; line-height: 1.7;
-    max-height: 340px; overflow-y: auto;
-  }
+  /* Analysis */
+  .analysis-section { margin-bottom: 1.75rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+  .analysis-body { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem 1.4rem; display: flex; flex-direction: column; gap: 0.85rem; max-height: 520px; overflow-y: auto; }
+  .analysis-heading { font-family: var(--font-head); font-size: 0.95rem; font-weight: 700; color: var(--accent2); padding-top: 0.35rem; border-top: 1px solid var(--border); margin-top: 0.35rem; }
+  .analysis-heading:first-child { border-top: none; margin-top: 0; padding-top: 0; }
+  .analysis-para { font-size: 0.9rem; color: var(--text); line-height: 1.75; }
+  .analysis-list { padding-left: 1.3rem; display: flex; flex-direction: column; gap: 0.35rem; }
+  .analysis-list li { font-size: 0.88rem; color: var(--text); line-height: 1.65; }
+  .analysis-list--ordered { list-style-type: decimal; }
+  .analysis-empty { color: var(--muted); font-size: 0.9rem; }
 
-  /* ── Settings ── */
-  .settings-section { padding: 2.5rem 0; }
-  .settings-section h3 { font-family: var(--font-head); font-size: 1.1rem; font-weight: 700; margin-bottom: 1.25rem; }
-  .settings-row { display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; }
-  .settings-row .field { flex: 1; min-width: 260px; margin-bottom: 0; }
+  /* Trade log */
+  .trade-log { margin-bottom: 1.75rem; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.83rem; font-family: var(--font-mono); }
+  thead tr { background: var(--bg); border-bottom: 1px solid var(--border); }
+  th { padding: 0.6rem 0.9rem; text-align: left; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 500; white-space: nowrap; }
+  td { padding: 0.55rem 0.9rem; border-bottom: 1px solid var(--border); color: var(--text); white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(255,255,255,0.025); }
+  .cell-buy  { color: var(--positive); font-weight: 600; }
+  .cell-sell { color: var(--negative); font-weight: 600; }
 
-  /* ── Responsive ── */
+  /* Raw details */
+  .raw-details { margin-top: 0.5rem; }
+  .raw-details summary { font-size: 0.8rem; color: var(--muted); cursor: pointer; padding: 0.4rem 0; font-family: var(--font-mono); }
+  .raw-details summary:hover { color: var(--text); }
+  .result-pre { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); white-space: pre-wrap; word-break: break-all; line-height: 1.7; max-height: 320px; overflow-y: auto; padding-top: 0.75rem; }
+
+  /* Responsive */
   @media (max-width: 700px) {
     .stats-row, .features, .grid-3 { grid-template-columns: 1fr; }
     .studio-head { flex-direction: column; }
