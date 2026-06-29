@@ -58,9 +58,10 @@ def create_custom_strategy(strategy_code: str, strategy_name: str):
 
 def save_custom_strategy(strategy_code: str, strategy_name: str):
     """
-    Save custom strategy to AWS S3
+    Save custom strategy to AWS S3, or fall back to a local file if S3 is unavailable.
     """
     try:
+        s3_client = get_s3_client()
         key = f"strategies/{strategy_name}_strategy.py"
         s3_client.put_object(
             Bucket=AWS_STRATEGY_BUCKET,
@@ -69,14 +70,21 @@ def save_custom_strategy(strategy_code: str, strategy_name: str):
             ContentType='text/plain'
         )
         return f"s3://{AWS_STRATEGY_BUCKET}/{key}"
-    except (NoCredentialsError, ClientError) as e:
-        raise ValueError(f"Error saving strategy to AWS S3: {str(e)}")
+    except Exception as e:
+        strategy_dir = os.path.join(BASE_DIR, "strategies")
+        os.makedirs(strategy_dir, exist_ok=True)
+        local_path = os.path.join(strategy_dir, f"{strategy_name}_strategy.py")
+        with open(local_path, "w", encoding="utf-8") as f:
+            f.write(strategy_code)
+        print(f"AWS S3 unavailable ({e}); saved strategy locally at {local_path}")
+        return f"local://{local_path}"
 
 def load_custom_strategy_code(strategy_name: str):
     """
     Load custom strategy code from AWS S3
     """
     try:
+        s3_client = get_s3_client()
         key = f"strategies/{strategy_name}_strategy.py"
         response = s3_client.get_object(Bucket=AWS_STRATEGY_BUCKET, Key=key)
         return response['Body'].read().decode('utf-8')
@@ -90,6 +98,7 @@ def list_custom_strategies_from_s3():
     List custom strategies stored in AWS S3
     """
     try:
+        s3_client = get_s3_client()
         response = s3_client.list_objects_v2(Bucket=AWS_STRATEGY_BUCKET, Prefix='strategies/')
         if 'Contents' not in response:
             return []
