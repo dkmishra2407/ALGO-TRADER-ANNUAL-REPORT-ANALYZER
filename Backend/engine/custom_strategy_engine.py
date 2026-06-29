@@ -13,8 +13,15 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 AWS_STRATEGY_BUCKET = os.getenv("AWS_STRATEGY_BUCKET", "algo-trader-strategies")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
+# Lazily initialized module-level client. Keeping this name defined avoids
+# NameError issues while still allowing tests/runtime to configure env first.
+s3_client = None
+
 def get_s3_client():
-    return boto3.client('s3', region_name=AWS_REGION)
+    global s3_client
+    if s3_client is None:
+        s3_client = boto3.client('s3', region_name=AWS_REGION)
+    return s3_client
 
 
 def create_custom_strategy(strategy_code: str, strategy_name: str):
@@ -62,6 +69,7 @@ def save_custom_strategy(strategy_code: str, strategy_name: str):
     """
     try:
         key = f"strategies/{strategy_name}_strategy.py"
+        s3_client = get_s3_client()
         s3_client.put_object(
             Bucket=AWS_STRATEGY_BUCKET,
             Key=key,
@@ -78,6 +86,7 @@ def load_custom_strategy_code(strategy_name: str):
     """
     try:
         key = f"strategies/{strategy_name}_strategy.py"
+        s3_client = get_s3_client()
         response = s3_client.get_object(Bucket=AWS_STRATEGY_BUCKET, Key=key)
         return response['Body'].read().decode('utf-8')
     except ClientError as e:
@@ -90,6 +99,7 @@ def list_custom_strategies_from_s3():
     List custom strategies stored in AWS S3
     """
     try:
+        s3_client = get_s3_client()
         response = s3_client.list_objects_v2(Bucket=AWS_STRATEGY_BUCKET, Prefix='strategies/')
         if 'Contents' not in response:
             return []
